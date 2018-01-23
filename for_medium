@@ -1,0 +1,230 @@
+## Imports 
+
+from binance.client import Client as binance_Client
+import binance.enums
+from binance.exceptions import BinanceAPIException, BinanceWithdrawException
+from kucoin.client import Client as kucoin_Client
+import kucoin
+from kucoin import exceptions
+from kucoin.exceptions import KucoinAPIException, KucoinRequestException, KucoinResolutionException
+import numpy as np    ## Math 
+import requests as rq ## API get requests
+import pandas as pd   ## Dataframes 
+import datetime       ## Track time 
+import time           ## Wait times for API
+from __future__ import division
+
+## Set up python binance
+binance = binance_Client(api_key = "xxx",
+                api_secret = "xxx")
+
+## Set up python kucoin
+kucoin = kucoin_Client(api_key = "xxx", 
+                api_secret = "xxx",
+                language = "en_US")
+
+## Get binance info
+binance_info = binance.get_exchange_info()
+binance_info_symbols = binance_info["symbols"]
+binance_symbols = []
+
+## Construct list of total markets 
+for each_dict in binance_info_symbols:
+    binance_symbols.append(each_dict["symbol"])
+
+## Construct list of alt markets
+binance_keep = []
+for each_market in binance_symbols:
+    if each_market[-3:] == "ETH":
+        binance_keep.append(each_market[0:(len(each_market) - 3)])
+    
+## Get Kucoin info
+kucoin_info = kucoin.get_trading_symbols()
+kucoin_symbols = []
+
+## Construct list of total markets 
+for each_dict in kucoin_info:
+    kucoin_symbols.append(each_dict["symbol"])
+
+## Construct list of alt markets 
+kucoin_keep = []
+for each_market in kucoin_symbols:
+    if each_market[-3:] == "ETH":
+        kucoin_keep.append(each_market.split("-")[0])
+        
+## Get intersection 
+#keep = set(binance_keep).intersection(bittrex_keep)
+
+keep = set(binance_keep).intersection(kucoin_keep)
+
+## Now make lists of pairs we can send to the apis 
+symbols_binance = []
+for alt in keep: 
+    symbols_binance.append(alt + "ETH")
+     
+symbols_kucoin = []
+for alt in keep:
+    symbols_kucoin.append(alt + "-ETH")
+
+def get_data(binance_symbol = "",
+             kucoin_symbol = "",
+             limit = 50
+            ):
+    
+    have_binance = False
+    while not have_binance:
+        try: 
+            binance_dat = binance.get_order_book(symbol = binance_symbol,
+                                                 limit = limit)
+            binance_time = datetime.datetime.now()
+            if "asks" in binance_dat and type(binance_dat["asks"]) == list and type(binance_dat["bids"]) == list:
+                have_binance = True
+        except (BinanceAPIException, BinanceWithdrawException) as e: 
+            print(e)
+            time.sleep(5)
+            continue
+        except requests.exceptions.RequestException as e:
+            print(e)
+            time.sleep(5)
+ 
+    have_kucoin = False
+    while not have_kucoin:
+        try: 
+            ## Get market info from kucoin
+            kucoin_dat = kucoin.get_order_book(symbol = kucoin_symbol,
+                                               limit = limit)
+            kucoin_time = datetime.datetime.now()
+            if "SELL" in kucoin_dat and type(kucoin_dat["SELL"]) == list and type(kucoin_dat["BUY"]) == list:
+                have_kucoin = True
+        except (KucoinAPIException, KucoinResolutionException, KucoinRequestException) as e:
+            print(e)
+            time.sleep(5)
+            continue
+        except requests.exceptions.RequestException as e:
+            print(e)
+            time.sleep(5)
+    
+    return [binance_dat, kucoin_dat, binance_time, kucoin_time, binance_symbol]
+
+def binance_to_array(data): 
+
+    ## Make 2-D numpy array with price and quantity
+
+    binance_array = np.empty( (0,2) , dtype = "float64")
+
+    for each_list in data:
+        binance_array = np.append(binance_array, np.array([[each_list[0], each_list[1]]], dtype = "float64"), 
+                                  axis = 0)
+        
+    return binance_array
+
+def kucoin_to_array(data):
+
+    ## Similarly, make a 2-D numpy array 
+
+    kucoin_array = np.empty( (0,2) )
+
+    for each_list in data:
+        kucoin_array = np.append(kucoin_array, np.array([[each_list[0], each_list[1]]], dtype = "float64"), 
+                                      axis = 0)
+        
+    return kucoin_array
+
+def clean_data(data):
+    
+    ## Initial cleaning/subsetting
+    binance_bids = data[0]["bids"]
+    binance_asks = data[0]["asks"]
+    
+    kucoin_bids = data[1]["BUY"]
+    kucoin_asks = data[1]["SELL"]
+    
+    ## Create numpy arrays with relevent information 
+    binance_bids_array = binance_to_array(data = binance_bids)
+    binance_asks_array = binance_to_array(data = binance_asks)
+
+    kucoin_bids_array = kucoin_to_array(data = kucoin_bids)
+    kucoin_asks_array = kucoin_to_array(data = kucoin_asks)
+
+    ## Find smallest length
+    lengths = [len(binance_bids_array), len(binance_asks_array), len(kucoin_bids_array), len(kucoin_asks_array)]
+    min_length = min(lengths)
+    
+    ## Construct pandas dataframe 
+    full_data = pd.DataFrame({"binance_bids_price":binance_bids_array[:, 0][0:min_length],
+                              "binance_bids_quantity":binance_bids_array[:, 1][0:min_length],
+                              "binance_asks_price":binance_asks_array[:, 0][0:min_length],
+                              "binance_asks_quantity":binance_asks_array[:, 1][0:min_length],
+                              "kucoin_bids_price":kucoin_bids_array[:, 0][0:min_length],
+                              "kucoin_bids_quantity":kucoin_bids_array[:, 1][0:min_length],
+                              "kucoin_asks_price":kucoin_asks_array[:, 0][0:min_length],
+                              "kucoin_asks_quantity":kucoin_asks_array[:, 1][0:min_length]})
+    
+    ## Add variables
+    full_data["binance_time"] = data[2]
+    full_data["kucoin_time"] = data[3]
+    full_data["market"] = data[4]
+    
+    return [full_data, data[4]]
+
+def write_csvfiles(cleaned_data,
+                   single_market = True):
+    
+    ## Get timestamp for data in correct format 
+    date = cleaned_data[0]["binance_time"][0]
+    string_date = date.strftime("%Y-%m-%d_%H:%M:%S.%f")
+
+    if single_market:
+        full_file = "/Users/rkmoss/Desktop/crypto/data/single_market/" + cleaned_data[1] + "_" + string_date + ".csv"
+    else: 
+        full_file = "/Users/rkmoss/Desktop/crypto/data/all_markets/" + cleaned_data[1] + "_" + string_date + ".csv"
+    
+    ## Write csv file containing relevant information
+    cleaned_data[0].to_csv(full_file)
+    
+    print(full_file)
+    
+def get_markets(binance_symbols,
+                kucoin_symbols,
+                wait_between_markets = 1,
+                wait_between_sets = 10,
+                total_wait_time = 10,
+                one_currency = False):
+    
+    ## Full data gathering process
+    
+    ## Keep track of time
+    starting_time = datetime.datetime.now()
+    
+    ## while time elapsed is less than total time in minutes
+    while((datetime.datetime.now() - starting_time).seconds < (total_wait_time * 60)):
+        
+        ## Loop through the available symbol pairs and gather data 
+        for this_binance_symbol, this_kucoin_symbol in zip(binance_symbols, kucoin_symbols):
+            
+            ## FOR DEBUGGING
+            print(this_binance_symbol)
+            print(this_kucoin_symbol)
+            
+            ## Get data for this symbol
+            crypto_data = get_data(binance_symbol = this_binance_symbol,
+                                   kucoin_symbol = this_kucoin_symbol,
+                                   limit = 50
+                                   )
+            
+            ## Clean this data
+            cleaned_crypto_data = clean_data(data = crypto_data)
+            
+            ## Write csv files for this data including the relevant information
+            write_csvfiles(cleaned_data = cleaned_crypto_data,
+                           single_market = one_currency)
+            
+            ## Wait some amount of time to prevent spamming the API
+            time.sleep(wait_between_markets)
+        time.sleep(wait_between_sets * 60)
+        
+get_markets(binance_symbols = symbols_binance,
+         kucoin_symbols = symbols_kucoin,
+         wait_between_markets = 0.1,
+         wait_between_sets = 1,
+         total_wait_time = 2500)
